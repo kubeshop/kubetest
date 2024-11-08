@@ -606,3 +606,7 @@ func (r *MongoRepository) GetExecutionTags(ctx context.Context, testWorkflowName
 
 	return tags, nil
 }
+
+func (r *MongoRepository) ScheduleExecution(ctx context.Context, request ExecutionScheduleRequest) (executions []testkube.TestWorkflowExecution, err error) {
+	panic("not implemented")
+}

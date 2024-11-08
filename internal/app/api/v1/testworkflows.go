@@ -15,9 +15,8 @@ import (
 	"github.com/kubeshop/testkube/internal/common"
 	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
 	"github.com/kubeshop/testkube/pkg/mapper/testworkflows"
-	"github.com/kubeshop/testkube/pkg/scheduler"
+	testworkflow2 "github.com/kubeshop/testkube/pkg/repository/testworkflow"
 	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowresolver"
-	"github.com/kubeshop/testkube/pkg/workerpool"
 )
 
 func (s *TestkubeAPI) ListTestWorkflowsHandler() fiber.Handler {
@@ -348,11 +347,8 @@ func (s *TestkubeAPI) ExecuteTestWorkflowHandler() fiber.Handler {
 	return func(c *fiber.Ctx) (err error) {
 		ctx := c.Context()
 		name := c.Params("id")
+
 		errPrefix := fmt.Sprintf("failed to execute test workflow '%s'", name)
-		workflow, err := s.TestWorkflowsClient.Get(name)
-		if err != nil {
-			return s.ClientError(c, errPrefix, err)
-		}
 
 		// Load the execution request
 		var request testkube.TestWorkflowExecutionRequest
@@ -368,40 +364,24 @@ func (s *TestkubeAPI) ExecuteTestWorkflowHandler() fiber.Handler {
 			}
 		}
 
-		var results []testkube.TestWorkflowExecution
-		var errs []error
-
-		request.TestWorkflowExecutionName = strings.Clone(c.Query("testWorkflowExecutionName"))
-		concurrencyLevel := scheduler.DefaultConcurrencyLevel
-		workerpoolService := workerpool.New[testworkflowsv1.TestWorkflow, testkube.TestWorkflowExecutionRequest,
-			testkube.TestWorkflowExecution](concurrencyLevel)
-		requests := []workerpool.Request[testworkflowsv1.TestWorkflow, testkube.TestWorkflowExecutionRequest, testkube.TestWorkflowExecution]{
-			{
-				Object:  *workflow,
-				Options: request,
-				ExecFn:  s.TestWorkflowExecutor.Execute,
-			},
+		// Build execution request
+		executions, err := s.TestWorkflowResults.ScheduleExecution(ctx, testworkflow2.ExecutionScheduleRequest{
+			Name:                            name,
+			Config:                          request.Config,
+			ExecutionName:                   request.Name,
+			Tags:                            request.Tags,
+			DisableWebhooks:                 request.DisableWebhooks,
+			TestWorkflowExecutionObjectName: c.Query("testWorkflowExecutionName"),
+			RunningContext:                  request.RunningContext,
+			ParentExecutionIds:              request.ParentExecutionIds,
+		})
+		if err != nil {
+			return s.InternalError(c, errPrefix, "execution error", err)
 		}
-
-		go workerpoolService.SendRequests(requests)
-		go workerpoolService.Run(ctx)
-
-		for r := range workerpoolService.GetResponses() {
-			results = append(results, r.Result)
-			if r.Err != nil {
-				errs = append(errs, r.Err)
-			}
+		if len(executions) == 0 {
+			return s.InternalError(c, errPrefix, "error", errors.New("no execution results"))
 		}
-
-		if len(errs) != 0 {
-			return s.InternalError(c, errPrefix, "execution error", errs[0])
-		}
-
-		if len(results) != 0 {
-			return c.JSON(results[0])
-		}
-
-		return s.InternalError(c, errPrefix, "error", errors.New("no execution results"))
+		return c.JSON(executions[0])
 	}
 }
 

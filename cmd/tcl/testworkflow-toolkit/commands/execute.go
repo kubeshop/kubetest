@@ -9,6 +9,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	testworkflowsv1 "github.com/kubeshop/testkube-operator/api/testworkflows/v1"
 	commontcl "github.com/kubeshop/testkube/cmd/tcl/testworkflow-toolkit/common"
@@ -28,8 +31,12 @@ import (
 	"github.com/kubeshop/testkube/cmd/testworkflow-toolkit/env/config"
 	"github.com/kubeshop/testkube/cmd/testworkflow-toolkit/transfer"
 	"github.com/kubeshop/testkube/internal/common"
+	"github.com/kubeshop/testkube/pkg/agent"
 	"github.com/kubeshop/testkube/pkg/api/v1/client"
 	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
+	"github.com/kubeshop/testkube/pkg/capabilities"
+	cloudexecutor "github.com/kubeshop/testkube/pkg/cloud/data/executor"
+	"github.com/kubeshop/testkube/pkg/cloud/data/testworkflow"
 	"github.com/kubeshop/testkube/pkg/expressions"
 	"github.com/kubeshop/testkube/pkg/mapper/testworkflows"
 	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/constants"
@@ -157,40 +164,117 @@ func buildTestExecution(test testworkflowsv1.StepExecuteTest, async bool) (func(
 	}, nil
 }
 
-func buildWorkflowExecution(workflow testworkflowsv1.StepExecuteWorkflow, async bool) (func() error, error) {
+type workflowExecutor interface {
+	Execute(workflow testworkflowsv1.StepExecuteWorkflow) ([]testkube.TestWorkflowExecution, error)
+	Get(id string) (testkube.TestWorkflowExecution, error)
+}
+
+type legacyWorkflowExecutor struct {
+	client client.Client
+}
+
+func newLegacyWorkflowExecutor() workflowExecutor {
+	return &legacyWorkflowExecutor{client: env.Testkube()}
+}
+
+func (e *legacyWorkflowExecutor) Execute(workflow testworkflowsv1.StepExecuteWorkflow) ([]testkube.TestWorkflowExecution, error) {
+	parentIds := []string{config.ExecutionId()}
+	if config.Config().Execution.ParentIds != "" {
+		parentIds = append(strings.Split(config.Config().Execution.ParentIds, "/"), parentIds...)
+	}
+	exec, err := e.client.ExecuteTestWorkflow(workflow.Name, testkube.TestWorkflowExecutionRequest{
+		Name:            workflow.ExecutionName,
+		Config:          testworkflows.MapConfigValueKubeToAPI(workflow.Config),
+		DisableWebhooks: config.ExecutionDisableWebhooks(),
+		Tags:            config.ExecutionTags(),
+		RunningContext: &testkube.TestWorkflowRunningContext{
+			Interface_: &testkube.TestWorkflowRunningContextInterface{
+				Type_: common.Ptr(testkube.API_TestWorkflowRunningContextInterfaceType),
+			},
+			Actor: &testkube.TestWorkflowRunningContextActor{
+				Name:          config.WorkflowName(),
+				ExecutionId:   config.ExecutionId(),
+				ExecutionPath: strings.Join(parentIds, "/"),
+				Type_:         common.Ptr(testkube.TESTWORKFLOW_TestWorkflowRunningContextActorType),
+			},
+		},
+		ParentExecutionIds: parentIds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []testkube.TestWorkflowExecution{exec}, nil
+}
+
+func (e *legacyWorkflowExecutor) Get(id string) (testkube.TestWorkflowExecution, error) {
+	return e.client.GetTestWorkflowExecution(id)
+}
+
+type cloudWorkflowExecutor struct {
+	client cloudexecutor.Executor
+}
+
+func newCloudWorkflowExecutor() workflowExecutor {
+	c, _ := env.Cloud(context.Background())
+	return &cloudWorkflowExecutor{client: c}
+}
+
+func (e *cloudWorkflowExecutor) Execute(workflow testworkflowsv1.StepExecuteWorkflow) ([]testkube.TestWorkflowExecution, error) {
+	parentIds := []string{config.ExecutionId()}
+	if config.Config().Execution.ParentIds != "" {
+		parentIds = append(strings.Split(config.Config().Execution.ParentIds, "/"), parentIds...)
+	}
+
+	response, err := e.client.Execute(context.Background(), testworkflow.CmdTestWorkflowExecutionSchedule, &testworkflow.ExecutionScheduleRequest{
+		Name:            workflow.Name,
+		Config:          testworkflows.MapConfigValueKubeToAPI(workflow.Config),
+		ExecutionName:   workflow.ExecutionName,
+		Tags:            config.ExecutionTags(),
+		DisableWebhooks: config.ExecutionDisableWebhooks(),
+		RunningContext: &testkube.TestWorkflowRunningContext{
+			Interface_: &testkube.TestWorkflowRunningContextInterface{
+				Type_: common.Ptr(testkube.API_TestWorkflowRunningContextInterfaceType),
+			},
+			Actor: &testkube.TestWorkflowRunningContextActor{
+				Name:          config.WorkflowName(),
+				ExecutionId:   config.ExecutionId(),
+				ExecutionPath: strings.Join(parentIds, "/"),
+				Type_:         common.Ptr(testkube.TESTWORKFLOW_TestWorkflowRunningContextActorType),
+			},
+		},
+		ParentExecutionIds: parentIds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var commandResponse testworkflow.ExecutionScheduleResponse
+	if err = json.Unmarshal(response, &commandResponse); err != nil {
+		return nil, err
+	}
+	return commandResponse.Executions, nil
+}
+
+func (e *cloudWorkflowExecutor) Get(id string) (testkube.TestWorkflowExecution, error) {
+	response, err := e.client.Execute(context.Background(), testworkflow.CmdTestWorkflowExecutionGet, testworkflow.ExecutionGetRequest{
+		ID: id,
+	})
+	if err != nil {
+		return testkube.TestWorkflowExecution{}, err
+	}
+	var commandResponse testworkflow.ExecutionGetResponse
+	err = json.Unmarshal(response, &commandResponse)
+	return commandResponse.WorkflowExecution, err
+}
+
+func buildWorkflowExecution(executor workflowExecutor, workflow testworkflowsv1.StepExecuteWorkflow, async bool) (func() error, error) {
 	return func() (err error) {
-		c := env.Testkube()
-
-		tags := config.ExecutionTags()
-
-		parentIds := []string{config.ExecutionId()}
-		if config.Config().Execution.ParentIds != "" {
-			parentIds = append(strings.Split(config.Config().Execution.ParentIds, "/"), parentIds...)
-		}
-
-		var exec testkube.TestWorkflowExecution
+		var execs []testkube.TestWorkflowExecution
 		for i := 0; i < CreateExecutionRetryOnFailureMaxAttempts; i++ {
-			exec, err = c.ExecuteTestWorkflow(workflow.Name, testkube.TestWorkflowExecutionRequest{
-				Name:            workflow.ExecutionName,
-				Config:          testworkflows.MapConfigValueKubeToAPI(workflow.Config),
-				DisableWebhooks: config.ExecutionDisableWebhooks(),
-				Tags:            tags,
-				RunningContext: &testkube.TestWorkflowRunningContext{
-					Interface_: &testkube.TestWorkflowRunningContextInterface{
-						Type_: common.Ptr(testkube.API_TestWorkflowRunningContextInterfaceType),
-					},
-					Actor: &testkube.TestWorkflowRunningContextActor{
-						Name:          config.WorkflowName(),
-						ExecutionId:   config.ExecutionId(),
-						ExecutionPath: strings.Join(parentIds, "/"),
-						Type_:         common.Ptr(testkube.TESTWORKFLOW_TestWorkflowRunningContextActorType),
-					},
-				},
-				ParentExecutionIds: parentIds,
-			})
+			execs, err = executor.Execute(workflow)
 			if err == nil {
 				break
 			}
+
 			if i+1 < CreateExecutionRetryOnFailureMaxAttempts {
 				nextDelay := time.Duration(i+1) * CreateExecutionRetryOnFailureBaseDelay
 				ui.Errf("failed to execute test workflow: retrying in %s (attempt %d/%d): %s: %s", nextDelay.String(), i+2, CreateExecutionRetryOnFailureMaxAttempts, workflow.Name, err.Error())
@@ -201,70 +285,81 @@ func buildWorkflowExecution(workflow testworkflowsv1.StepExecuteWorkflow, async 
 			ui.Errf("failed to execute test workflow: %s: %s", workflow.Name, err.Error())
 			return
 		}
-		execName := exec.Name
 
-		instructions.PrintOutput(config.Ref(), "testworkflow-start", &testWorkflowExecutionDetails{
-			Id:               exec.Id,
-			Name:             exec.Name,
-			TestWorkflowName: exec.Workflow.Name,
-			Description:      workflow.Description,
-		})
-		description := ""
-		if workflow.Description != "" {
-			description = fmt.Sprintf(": %s", workflow.Description)
+		for _, exec := range execs {
+			execName := exec.Name
+
+			instructions.PrintOutput(config.Ref(), "testworkflow-start", &testWorkflowExecutionDetails{
+				Id:               exec.Id,
+				Name:             exec.Name,
+				TestWorkflowName: exec.Workflow.Name,
+				Description:      workflow.Description,
+			})
+			description := ""
+			if workflow.Description != "" {
+				description = fmt.Sprintf(": %s", workflow.Description)
+			}
+			fmt.Printf("%s%s • scheduled %s\n", ui.LightCyan(execName), description, ui.DarkGray("("+exec.Id+")"))
 		}
-		fmt.Printf("%s%s • scheduled %s\n", ui.LightCyan(execName), description, ui.DarkGray("("+exec.Id+")"))
 
 		if async {
 			return
 		}
 
-		prevStatus := testkube.QUEUED_TestWorkflowStatus
-	loop:
-		for {
-			time.Sleep(100 * time.Millisecond)
-			for i := 0; i < GetExecutionRetryOnFailureMaxAttempts; i++ {
-				var nextExec testkube.TestWorkflowExecution
-				nextExec, err = c.GetTestWorkflowExecution(exec.Id)
-				if err == nil {
-					exec = nextExec
-					break
-				}
-				if i+1 < GetExecutionRetryOnFailureMaxAttempts {
-					ui.Errf("error while getting execution result: retrying in %s (attempt %d/%d): %s: %s", GetExecutionRetryOnFailureDelay.String(), i+2, GetExecutionRetryOnFailureMaxAttempts, ui.LightCyan(execName), err.Error())
-					time.Sleep(GetExecutionRetryOnFailureDelay)
-				}
-			}
-			if err != nil {
-				ui.Errf("error while getting execution result: %s: %s", ui.LightCyan(execName), err.Error())
-				return
-			}
-			if exec.Result != nil && exec.Result.Status != nil {
-				status := *exec.Result.Status
-				switch status {
-				case testkube.QUEUED_TestWorkflowStatus, testkube.RUNNING_TestWorkflowStatus:
-					break
-				default:
-					break loop
-				}
-				if prevStatus != status {
-					instructions.PrintOutput(config.Ref(), "testworkflow-status", &executionResult{Id: exec.Id, Status: string(status)})
-				}
-				prevStatus = status
-			}
+		var g errgroup.Group
+		for _, exec := range execs {
+			func(exec testkube.TestWorkflowExecution) {
+				g.Go(func() error {
+					prevStatus := testkube.QUEUED_TestWorkflowStatus
+				loop:
+					for {
+						time.Sleep(100 * time.Millisecond)
+						for i := 0; i < GetExecutionRetryOnFailureMaxAttempts; i++ {
+							var nextExec testkube.TestWorkflowExecution
+							nextExec, err = executor.Get(exec.Id)
+							if err == nil {
+								exec = nextExec
+								break
+							}
+							if i+1 < GetExecutionRetryOnFailureMaxAttempts {
+								ui.Errf("error while getting execution result: retrying in %s (attempt %d/%d): %s: %s", GetExecutionRetryOnFailureDelay.String(), i+2, GetExecutionRetryOnFailureMaxAttempts, ui.LightCyan(exec.Name), err.Error())
+								time.Sleep(GetExecutionRetryOnFailureDelay)
+							}
+						}
+						if err != nil {
+							ui.Errf("error while getting execution result: %s: %s", ui.LightCyan(exec.Name), err.Error())
+							return err
+						}
+						if exec.Result != nil && exec.Result.Status != nil {
+							status := *exec.Result.Status
+							switch status {
+							case testkube.QUEUED_TestWorkflowStatus, testkube.RUNNING_TestWorkflowStatus:
+								break
+							default:
+								break loop
+							}
+							if prevStatus != status {
+								instructions.PrintOutput(config.Ref(), "testworkflow-status", &executionResult{Id: exec.Id, Status: string(status)})
+							}
+							prevStatus = status
+						}
+					}
+
+					status := *exec.Result.Status
+					color := ui.Green
+
+					if status != testkube.PASSED_TestWorkflowStatus {
+						err = errors.New("test workflow failed")
+						color = ui.Red
+					}
+
+					instructions.PrintOutput(config.Ref(), "testworkflow-end", &executionResult{Id: exec.Id, Status: string(status)})
+					fmt.Printf("%s • %s\n", color(exec.Name), string(status))
+					return nil
+				})
+			}(exec)
 		}
-
-		status := *exec.Result.Status
-		color := ui.Green
-
-		if status != testkube.PASSED_TestWorkflowStatus {
-			err = errors.New("test workflow failed")
-			color = ui.Red
-		}
-
-		instructions.PrintOutput(config.Ref(), "testworkflow-end", &executionResult{Id: exec.Id, Status: string(status)})
-		fmt.Printf("%s • %s\n", color(execName), string(status))
-		return
+		return g.Wait()
 	}, nil
 }
 
@@ -368,6 +463,16 @@ func NewExecuteCmd() *cobra.Command {
 					operations = append(operations, fn)
 				}
 			}
+
+			// Select strategy for scheduling the executions
+			ctx := agent.AddAPIKeyMeta(context.Background(), config.Config().Worker.Connection.ApiKey)
+			_, client := env.Cloud(ctx)
+			proContext, err := client.GetProContext(ctx, &emptypb.Empty{})
+			executor := newLegacyWorkflowExecutor()
+			if err == nil && capabilities.Enabled(proContext.Capabilities, capabilities.CapabilityScheduleExecution) {
+				executor = newCloudWorkflowExecutor()
+			}
+
 			for _, s := range workflows {
 				var w testworkflowsv1.StepExecuteWorkflow
 				err := json.Unmarshal([]byte(s), &w)
@@ -399,7 +504,7 @@ func NewExecuteCmd() *cobra.Command {
 					if err != nil {
 						ui.Fail(errors.Wrapf(err, "'%s' workflow: computing execution", spec.Name))
 					}
-					fn, err := buildWorkflowExecution(*spec, async)
+					fn, err := buildWorkflowExecution(executor, *spec, async)
 					if err != nil {
 						ui.Fail(err)
 					}

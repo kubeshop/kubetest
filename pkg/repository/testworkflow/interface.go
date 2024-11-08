@@ -88,6 +88,28 @@ type Repository interface {
 	GetTestWorkflowMetrics(ctx context.Context, name string, limit, last int) (metrics testkube.ExecutionsMetrics, err error)
 	// GetExecutionTags gets execution tags
 	GetExecutionTags(ctx context.Context, testWorkflowName string) (map[string][]string, error)
+
+	// ScheduleExecution schedules a new execution
+	ScheduleExecution(ctx context.Context, request ExecutionScheduleRequest) (executions []testkube.TestWorkflowExecution, err error)
+}
+
+type ExecutionScheduleRequest struct {
+	// Test Workflow details
+	Name   string            `json:"name,omitempty"`
+	Config map[string]string `json:"config,omitempty"`
+
+	// Execution details
+	ExecutionName   string            `json:"executionName,omitempty"`
+	Tags            map[string]string `json:"tags,omitempty"`
+	DisableWebhooks bool              `json:"disableWebhooks,omitempty"`
+
+	// Kubernetes resource
+	TestWorkflowExecutionObjectName string `json:"testWorkflowExecutionObjectName,omitempty"`
+
+	// Deprecated
+	RunningContext *testkube.TestWorkflowRunningContext `json:"runningContext,omitempty"`
+	// Deprecated
+	ParentExecutionIds []string `json:"parentExecutionIds,omitempty"`
 }
 
 type Sequences interface {

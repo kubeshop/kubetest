@@ -30,6 +30,8 @@ const (
 	CmdTestWorkflowOutputDeleteByTestWorkflow   executor.Command = "workflow_output_delete_by_test_workflow"
 	CmdTestworkflowOutputDeleteForTestWorkflows executor.Command = "workflow_output_delete_for_test_workflows"
 
+	CmdTestWorkflowExecutionSchedule executor.Command = "workflow_execution_schedule"
+
 	CmdTestWorkflowGet         executor.Command = "workflow_get"
 	CmdTestWorkflowTemplateGet executor.Command = "workflow_template_get"
 )
@@ -85,6 +87,9 @@ func command(v interface{}) executor.Command {
 		return CmdTestWorkflowOutputDeleteByTestWorkflow
 	case ExecutionDeleteOutputForTestWorkflowsRequest:
 		return CmdTestworkflowOutputDeleteForTestWorkflows
+
+	case ExecutionScheduleRequest:
+		return CmdTestWorkflowExecutionSchedule
 
 	case TestWorkflowGetRequest:
 		return CmdTestWorkflowGet

@@ -187,6 +187,29 @@ type ExecutionGetExecutionTagsResponse struct {
 	Tags map[string][]string `json:"tags"`
 }
 
+type ExecutionScheduleRequest struct {
+	// Test Workflow details
+	Name   string            `json:"name,omitempty"`
+	Config map[string]string `json:"config,omitempty"`
+
+	// Execution details
+	ExecutionName   string            `json:"executionName,omitempty"`
+	Tags            map[string]string `json:"tags,omitempty"`
+	DisableWebhooks bool              `json:"disableWebhooks,omitempty"`
+
+	// Kubernetes resource
+	TestWorkflowExecutionObjectName string `json:"testWorkflowExecutionObjectName,omitempty"`
+
+	// Deprecated
+	RunningContext *testkube.TestWorkflowRunningContext `json:"runningContext,omitempty"`
+	// Deprecated
+	ParentExecutionIds []string `json:"parentExecutionIds,omitempty"`
+}
+
+type ExecutionScheduleResponse struct {
+	Executions []testkube.TestWorkflowExecution `json:"executions,omitempty"`
+}
+
 type TestWorkflowListRequest struct {
 	Selector string `json:"selector"`
 }

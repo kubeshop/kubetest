@@ -277,6 +277,21 @@ func (mr *MockRepositoryMockRecorder) Insert(arg0, arg1 interface{}) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Insert", reflect.TypeOf((*MockRepository)(nil).Insert), arg0, arg1)
 }
 
+// ScheduleExecution mocks base method.
+func (m *MockRepository) ScheduleExecution(arg0 context.Context, arg1 ExecutionScheduleRequest) ([]testkube.TestWorkflowExecution, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ScheduleExecution", arg0, arg1)
+	ret0, _ := ret[0].([]testkube.TestWorkflowExecution)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ScheduleExecution indicates an expected call of ScheduleExecution.
+func (mr *MockRepositoryMockRecorder) ScheduleExecution(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ScheduleExecution", reflect.TypeOf((*MockRepository)(nil).ScheduleExecution), arg0, arg1)
+}
+
 // Update mocks base method.
 func (m *MockRepository) Update(arg0 context.Context, arg1 testkube.TestWorkflowExecution) error {
 	m.ctrl.T.Helper()

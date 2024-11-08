@@ -5,6 +5,7 @@ import "github.com/kubeshop/testkube/pkg/cloud"
 type Capability string
 
 const CapabilityJUnitReports Capability = "junit-reports"
+const CapabilityScheduleExecution Capability = "schedule"
 
 func Enabled(capabilities []*cloud.Capability, capability Capability) bool {
 	for _, c := range capabilities {

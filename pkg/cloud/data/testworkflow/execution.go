@@ -7,11 +7,10 @@ import (
 
 	"google.golang.org/grpc"
 
-	testworkflow2 "github.com/kubeshop/testkube/pkg/repository/testworkflow"
-
 	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
 	"github.com/kubeshop/testkube/pkg/cloud"
 	"github.com/kubeshop/testkube/pkg/cloud/data/executor"
+	testworkflow2 "github.com/kubeshop/testkube/pkg/repository/testworkflow"
 )
 
 var _ testworkflow2.Repository = (*CloudRepository)(nil)
@@ -176,4 +175,16 @@ func (r *CloudRepository) GetExecutionTags(ctx context.Context, testWorkflowName
 		return v.Tags
 	}
 	return pass(r.executor, ctx, req, process)
+}
+
+func (r *CloudRepository) ScheduleExecution(ctx context.Context, request testworkflow2.ExecutionScheduleRequest) (executions []testkube.TestWorkflowExecution, err error) {
+	response, err := r.executor.Execute(ctx, CmdTestWorkflowExecutionSchedule, request)
+	if err != nil {
+		return nil, err
+	}
+	var commandResponse ExecutionScheduleResponse
+	if err := json.Unmarshal(response, &commandResponse); err != nil {
+		return nil, err
+	}
+	return commandResponse.Executions, nil
 }

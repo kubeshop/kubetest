@@ -82,9 +82,11 @@ func main() {
 
 	configMapConfig := commons.MustGetConfigMapConfig(ctx, cfg.APIServerConfig, cfg.TestkubeNamespace, cfg.TestkubeAnalyticsEnabled)
 
+	var testWorkflowExecutor testworkflowexecutor.TestWorkflowExecutor
+
 	// Start local Control Plane
 	if mode == common.ModeStandalone {
-		controlPlane := services.CreateControlPlane(ctx, cfg, features, configMapConfig)
+		controlPlane := services.CreateControlPlane(ctx, cfg, features, configMapConfig, &testWorkflowExecutor)
 		g.Go(func() error {
 			return controlPlane.Run(ctx)
 		})
@@ -254,7 +256,7 @@ func main() {
 		}
 	}()
 
-	testWorkflowExecutor := testworkflowexecutor.New(
+	testWorkflowExecutor = testworkflowexecutor.New(
 		eventsEmitter,
 		runner,
 		clientset,

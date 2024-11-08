@@ -15,12 +15,11 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"github.com/kubeshop/testkube/pkg/capabilities"
 	"github.com/kubeshop/testkube/pkg/cloud"
 	"github.com/kubeshop/testkube/pkg/cloud/data/executor"
 )
@@ -59,7 +58,11 @@ func New(cfg Config, commandGroups ...CommandHandlers) *Server {
 }
 
 func (s *Server) GetProContext(_ context.Context, _ *emptypb.Empty) (*cloud.ProContextResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "not supported in the standalone version")
+	return &cloud.ProContextResponse{
+		Capabilities: []*cloud.Capability{
+			{Name: string(capabilities.CapabilityScheduleExecution), Enabled: true},
+		},
+	}, nil
 }
 
 func (s *Server) ExecuteAsync(srv cloud.TestKubeCloudAPI_ExecuteAsyncServer) error {

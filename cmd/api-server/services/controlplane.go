@@ -5,11 +5,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	kubeclient "github.com/kubeshop/testkube-operator/pkg/client"
+	testworkflowsclientv1 "github.com/kubeshop/testkube-operator/pkg/client/testworkflows/v1"
 	"github.com/kubeshop/testkube/cmd/api-server/commons"
 	"github.com/kubeshop/testkube/internal/config"
+	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
 	cloudartifacts "github.com/kubeshop/testkube/pkg/cloud/data/artifact"
 	cloudconfig "github.com/kubeshop/testkube/pkg/cloud/data/config"
 	cloudresult "github.com/kubeshop/testkube/pkg/cloud/data/result"
@@ -28,6 +32,7 @@ import (
 	"github.com/kubeshop/testkube/pkg/secret"
 	"github.com/kubeshop/testkube/pkg/storage/minio"
 	"github.com/kubeshop/testkube/pkg/tcl/checktcl"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowexecutor"
 )
 
 func mapTestWorkflowFilters(s []*testworkflow.FilterImpl) []testworkflow.Filter {
@@ -54,8 +59,10 @@ func mapTestSuiteFilters(s []*testresult.FilterImpl) []testresult.Filter {
 	return v
 }
 
-func CreateControlPlane(ctx context.Context, cfg *config.Config, features featureflags.FeatureFlags, configMapClient configRepo.Repository) *controlplane.Server {
+func CreateControlPlane(ctx context.Context, cfg *config.Config, features featureflags.FeatureFlags, configMapClient configRepo.Repository, executorPtr *testworkflowexecutor.TestWorkflowExecutor) *controlplane.Server {
 	// Connect to the cluster
+	kubeClient, err := kubeclient.GetClient()
+	commons.ExitOnError("Getting kubernetes client", err)
 	clientset, err := k8sclient.ConnectToK8s()
 	commons.ExitOnError("Creating k8s clientset", err)
 
@@ -63,6 +70,7 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 	secretClient := secret.NewClientFor(clientset, cfg.TestkubeNamespace)
 	db := commons.MustGetMongoDatabase(ctx, cfg, secretClient, !cfg.DisableMongoMigrations)
 	storageClient := commons.MustGetMinioClient(cfg)
+	testWorkflowsClient := testworkflowsclientv1.NewClient(kubeClient, cfg.TestkubeNamespace)
 
 	var logGrpcClient logsclient.StreamGetter
 	if !cfg.DisableDeprecatedTests && features.LogsV2 {
@@ -310,6 +318,34 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 		cloudtestworkflow.CmdTestWorkflowExecutionGetExecutionTags: controlplane.Handler(func(ctx context.Context, data cloudtestworkflow.ExecutionGetExecutionTagsRequest) (r cloudtestworkflow.ExecutionGetExecutionTagsResponse, err error) {
 			r.Tags, err = testWorkflowResultsRepository.GetExecutionTags(ctx, data.TestWorkflowName)
 			return
+		}),
+
+		cloudtestworkflow.CmdTestWorkflowExecutionSchedule: controlplane.Handler(func(ctx context.Context, data cloudtestworkflow.ExecutionScheduleRequest) (r cloudtestworkflow.ExecutionScheduleResponse, err error) {
+			if executorPtr == nil {
+				return r, errors.New("system is not started yet")
+			}
+
+			// Fetch the resources
+			workflow, err := testWorkflowsClient.Get(data.Name)
+			if err != nil {
+				return r, errors.Wrapf(err, "cannot get workflow '%s'", data.Name)
+			}
+
+			executor := *executorPtr
+			execution, err := executor.Execute(ctx, *workflow, testkube.TestWorkflowExecutionRequest{
+				Name:                      data.ExecutionName,
+				Config:                    data.Config,
+				TestWorkflowExecutionName: data.TestWorkflowExecutionObjectName,
+				DisableWebhooks:           data.DisableWebhooks,
+				Tags:                      data.Tags,
+				RunningContext:            data.RunningContext,
+				ParentExecutionIds:        data.ParentExecutionIds,
+			})
+			if err != nil {
+				return r, err
+			}
+			r.Executions = []testkube.TestWorkflowExecution{execution}
+			return r, nil
 		}),
 	}
 
