@@ -13,11 +13,9 @@ import (
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes"
 
 	testworkflowsv1 "github.com/kubeshop/testkube-operator/api/testworkflows/v1"
 	testworkflowsclientv1 "github.com/kubeshop/testkube-operator/pkg/client/testworkflows/v1"
-	v1 "github.com/kubeshop/testkube/internal/app/api/metrics"
 	"github.com/kubeshop/testkube/internal/common"
 	"github.com/kubeshop/testkube/internal/config"
 	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
@@ -25,7 +23,6 @@ import (
 	"github.com/kubeshop/testkube/pkg/expressions"
 	"github.com/kubeshop/testkube/pkg/log"
 	testworkflowmappers "github.com/kubeshop/testkube/pkg/mapper/testworkflows"
-	configRepo "github.com/kubeshop/testkube/pkg/repository/config"
 	"github.com/kubeshop/testkube/pkg/repository/testworkflow"
 	"github.com/kubeshop/testkube/pkg/runner"
 	"github.com/kubeshop/testkube/pkg/secretmanager"
@@ -50,14 +47,11 @@ type TestWorkflowExecutor interface {
 
 type executor struct {
 	emitter                      *event.Emitter
-	clientSet                    kubernetes.Interface
 	repository                   testworkflow.Repository
 	output                       testworkflow.OutputRepository
-	configMap                    configRepo.Repository
 	testWorkflowTemplatesClient  testworkflowsclientv1.TestWorkflowTemplatesInterface
 	testWorkflowExecutionsClient testworkflowsclientv1.TestWorkflowExecutionsInterface
 	testWorkflowsClient          testworkflowsclientv1.Interface
-	metrics                      v1.Metrics
 	secretManager                secretmanager.SecretManager
 	globalTemplateName           string
 	dashboardURI                 string
@@ -67,28 +61,22 @@ type executor struct {
 
 func New(emitter *event.Emitter,
 	runner runner.Runner,
-	clientSet kubernetes.Interface,
 	repository testworkflow.Repository,
 	output testworkflow.OutputRepository,
-	configMap configRepo.Repository,
 	testWorkflowTemplatesClient testworkflowsclientv1.TestWorkflowTemplatesInterface,
 	testWorkflowExecutionsClient testworkflowsclientv1.TestWorkflowExecutionsInterface,
 	testWorkflowsClient testworkflowsclientv1.Interface,
-	metrics v1.Metrics,
 	secretManager secretmanager.SecretManager,
 	globalTemplateName string,
 	dashboardURI string,
 	proContext *config.ProContext) TestWorkflowExecutor {
 	return &executor{
 		emitter:                      emitter,
-		clientSet:                    clientSet,
 		repository:                   repository,
 		output:                       output,
-		configMap:                    configMap,
 		testWorkflowTemplatesClient:  testWorkflowTemplatesClient,
 		testWorkflowExecutionsClient: testWorkflowExecutionsClient,
 		testWorkflowsClient:          testWorkflowsClient,
-		metrics:                      metrics,
 		secretManager:                secretManager,
 		globalTemplateName:           globalTemplateName,
 		dashboardURI:                 dashboardURI,
