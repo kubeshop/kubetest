@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 
 	"k8s.io/client-go/kubernetes"
@@ -28,6 +29,8 @@ import (
 	"github.com/kubeshop/testkube/pkg/secret"
 	"github.com/kubeshop/testkube/pkg/ui"
 )
+
+var sf singleflight.Group
 
 func KubernetesConfig() *rest.Config {
 	c, err := rest.InClusterConfig()
@@ -87,11 +90,25 @@ func Testkube() client.Client {
 }
 
 func Cloud(ctx context.Context) (cloudexecutor.Executor, cloud.TestKubeCloudAPIClient) {
-	cfg := config2.Config().Worker.Connection
-	grpcConn, err := agent.NewGRPCConnection(ctx, cfg.TlsInsecure, cfg.SkipVerify, cfg.Url, "", "", "", log.DefaultLogger)
+	type r struct {
+		client   cloud.TestKubeCloudAPIClient
+		executor *cloudexecutor.CloudGRPCExecutor
+	}
+	result, err, _ := sf.Do("cloud", func() (interface{}, error) {
+		cfg := config2.Config().Worker.Connection
+		logger := log.NewSilent()
+		grpcConn, err := agent.NewGRPCConnection(ctx, cfg.TlsInsecure, cfg.SkipVerify, cfg.Url, "", "", "", logger)
+		if err != nil {
+			return nil, err
+		}
+		grpcClient := cloud.NewTestKubeCloudAPIClient(grpcConn)
+		return r{
+			client:   grpcClient,
+			executor: cloudexecutor.NewCloudGRPCExecutor(grpcClient, grpcConn, cfg.ApiKey),
+		}, nil
+	})
 	if err != nil {
 		ui.Fail(fmt.Errorf("failed to connect with Cloud: %w", err))
 	}
-	grpcClient := cloud.NewTestKubeCloudAPIClient(grpcConn)
-	return cloudexecutor.NewCloudGRPCExecutor(grpcClient, grpcConn, cfg.ApiKey), grpcClient
+	return result.(r).executor, result.(r).client
 }
