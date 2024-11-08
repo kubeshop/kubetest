@@ -6,12 +6,14 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	testsv3 "github.com/kubeshop/testkube-operator/api/tests/v3"
 	testsuitesv3 "github.com/kubeshop/testkube-operator/api/testsuite/v3"
 	testtriggersv1 "github.com/kubeshop/testkube-operator/api/testtriggers/v1"
 	testworkflowsv1 "github.com/kubeshop/testkube-operator/api/testworkflows/v1"
+	testworkflow2 "github.com/kubeshop/testkube/pkg/repository/testworkflow"
 
 	"github.com/kubeshop/testkube/pkg/api/v1/testkube"
 	"github.com/kubeshop/testkube/pkg/scheduler"
@@ -147,40 +149,44 @@ func (s *Service) execute(ctx context.Context, e *watcherEvent, t *testtriggersv
 			request.Config[variable.Name] = variable.Value
 		}
 
-		wp := workerpool.New[testworkflowsv1.TestWorkflow, testkube.TestWorkflowExecutionRequest, testkube.TestWorkflowExecution](concurrencyLevel)
-		go func() {
-			isDelayDefined := t.Spec.Delay != nil
-			if isDelayDefined {
-				s.logger.Infof(
-					"trigger service: executor component: trigger %s/%s has delayed testworkflow execution configured for %f seconds",
-					t.Namespace, t.Name, t.Spec.Delay.Seconds(),
-				)
-				time.Sleep(t.Spec.Delay.Duration)
-			}
+		isDelayDefined := t.Spec.Delay != nil
+		if isDelayDefined {
 			s.logger.Infof(
-				"trigger service: executor component: scheduling testworkflow executions for trigger %s/%s",
-				t.Namespace, t.Name,
+				"trigger service: executor component: trigger %s/%s has delayed testworkflow execution configured for %f seconds",
+				t.Namespace, t.Name, t.Spec.Delay.Seconds(),
 			)
-
-			requests := make([]workerpool.Request[testworkflowsv1.TestWorkflow, testkube.TestWorkflowExecutionRequest,
-				testkube.TestWorkflowExecution], len(testWorkflows))
-			for i := range testWorkflows {
-				requests[i] = workerpool.Request[testworkflowsv1.TestWorkflow, testkube.TestWorkflowExecutionRequest,
-					testkube.TestWorkflowExecution]{
-					Object:  testWorkflows[i],
-					Options: request,
-					// Pro edition only (tcl protected code)
-					ExecFn: s.testWorkflowExecutor.Execute,
-				}
-			}
-
-			go wp.SendRequests(requests)
-			go wp.Run(ctx)
-		}()
-
-		for r := range wp.GetResponses() {
-			status.addTestWorkflowExecutionID(r.Result.Id)
+			time.Sleep(t.Spec.Delay.Duration)
 		}
+		s.logger.Infof(
+			"trigger service: executor component: scheduling testworkflow executions for trigger %s/%s",
+			t.Namespace, t.Name,
+		)
+
+		var g errgroup.Group
+		for _, workflow := range testWorkflows {
+			func(workflow testworkflowsv1.TestWorkflow) {
+				g.Go(func() error {
+					execs, err := s.testWorkflowResultsRepository.ScheduleExecution(ctx, testworkflow2.ExecutionScheduleRequest{
+						Name:               workflow.Name,
+						Config:             request.Config,
+						ExecutionName:      request.Name,
+						Tags:               request.Tags,
+						DisableWebhooks:    request.DisableWebhooks,
+						RunningContext:     request.RunningContext,
+						ParentExecutionIds: request.ParentExecutionIds,
+					})
+					if err != nil {
+						s.logger.Errorf("trigger service: failed to schedule testworkflow execution for trigger %s/%s: %s", t.Namespace, t.Name, err)
+					} else {
+						for _, exec := range execs {
+							status.addTestWorkflowExecutionID(exec.Id)
+						}
+					}
+					return nil
+				})
+			}(workflow)
+		}
+		g.Wait()
 
 	default:
 		return errors.Errorf("invalid execution: %s", t.Spec.Execution)

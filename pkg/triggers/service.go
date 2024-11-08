@@ -26,7 +26,6 @@ import (
 	"github.com/kubeshop/testkube/pkg/repository/testworkflow"
 	"github.com/kubeshop/testkube/pkg/telemetry"
 	"github.com/kubeshop/testkube/pkg/testworkflows/executionworker/executionworkertypes"
-	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowexecutor"
 	"github.com/kubeshop/testkube/pkg/utils"
 	"github.com/kubeshop/testkube/pkg/version"
 )
@@ -67,7 +66,6 @@ type Service struct {
 	eventsBus                     bus.Bus
 	metrics                       metrics.Metrics
 	executionWorkerClient         executionworkertypes.Worker
-	testWorkflowExecutor          testworkflowexecutor.TestWorkflowExecutor
 	testWorkflowResultsRepository testworkflow.Repository
 	testkubeNamespace             string
 	watcherNamespaces             []string
@@ -89,7 +87,6 @@ func NewService(
 	eventsBus bus.Bus,
 	metrics metrics.Metrics,
 	executionWorkerClient executionworkertypes.Worker,
-	testWorkflowExecutor testworkflowexecutor.TestWorkflowExecutor,
 	testWorkflowResultsRepository testworkflow.Repository,
 	opts ...Option,
 ) *Service {
@@ -113,7 +110,6 @@ func NewService(
 		eventsBus:                     eventsBus,
 		metrics:                       metrics,
 		executionWorkerClient:         executionWorkerClient,
-		testWorkflowExecutor:          testWorkflowExecutor,
 		testWorkflowResultsRepository: testWorkflowResultsRepository,
 		httpClient:                    http.NewClient(),
 		watchFromDate:                 time.Now(),

@@ -44,7 +44,6 @@ const (
 
 //go:generate mockgen -destination=./mock_executor.go -package=testworkflowexecutor "github.com/kubeshop/testkube/pkg/testworkflows/testworkflowexecutor" TestWorkflowExecutor
 type TestWorkflowExecutor interface {
-	Control(ctx context.Context, testWorkflow *testworkflowsv1.TestWorkflow, execution *testkube.TestWorkflowExecution) error
 	Execute(ctx context.Context, workflow testworkflowsv1.TestWorkflow, request testkube.TestWorkflowExecutionRequest) (
 		execution testkube.TestWorkflowExecution, err error)
 }
@@ -96,10 +95,6 @@ func New(emitter *event.Emitter,
 		runner:                       runner,
 		proContext:                   proContext,
 	}
-}
-
-func (e *executor) Control(ctx context.Context, testWorkflow *testworkflowsv1.TestWorkflow, execution *testkube.TestWorkflowExecution) error {
-	return e.runner.Monitor(ctx, execution.Id)
 }
 
 func (e *executor) getPreExecutionMachine(workflow *testworkflowsv1.TestWorkflow, orgId, envId string) expressions.Machine {
@@ -487,17 +482,6 @@ func (e *executor) Execute(ctx context.Context, workflow testworkflowsv1.TestWor
 
 	// Inform about execution start TODO: Consider
 	//e.emitter.Notify(testkube.NewEventStartTestWorkflow(execution))
-
-	// Start to control the results
-	go func() {
-		// TODO: Use OpenAPI objects only
-		err = e.Control(context.Background(), testworkflowmappers.MapAPIToKube(execution.Workflow), execution)
-		if err != nil {
-			// TODO: Handle fatal error
-			//e.handleFatalError(execution, err, time.Time{})
-			return
-		}
-	}()
 
 	return *execution, nil
 }

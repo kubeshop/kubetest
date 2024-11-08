@@ -29,6 +29,7 @@ import (
 	"github.com/kubeshop/testkube/pkg/repository/sequence"
 	"github.com/kubeshop/testkube/pkg/repository/testresult"
 	"github.com/kubeshop/testkube/pkg/repository/testworkflow"
+	runner2 "github.com/kubeshop/testkube/pkg/runner"
 	"github.com/kubeshop/testkube/pkg/secret"
 	"github.com/kubeshop/testkube/pkg/storage/minio"
 	"github.com/kubeshop/testkube/pkg/tcl/checktcl"
@@ -59,7 +60,7 @@ func mapTestSuiteFilters(s []*testresult.FilterImpl) []testresult.Filter {
 	return v
 }
 
-func CreateControlPlane(ctx context.Context, cfg *config.Config, features featureflags.FeatureFlags, configMapClient configRepo.Repository, executorPtr *testworkflowexecutor.TestWorkflowExecutor) *controlplane.Server {
+func CreateControlPlane(ctx context.Context, cfg *config.Config, features featureflags.FeatureFlags, configMapClient configRepo.Repository, executorPtr *testworkflowexecutor.TestWorkflowExecutor, runnerPtr *runner2.Runner) *controlplane.Server {
 	// Connect to the cluster
 	kubeClient, err := kubeclient.GetClient()
 	commons.ExitOnError("Getting kubernetes client", err)
@@ -321,9 +322,11 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 		}),
 
 		cloudtestworkflow.CmdTestWorkflowExecutionSchedule: controlplane.Handler(func(ctx context.Context, data cloudtestworkflow.ExecutionScheduleRequest) (r cloudtestworkflow.ExecutionScheduleResponse, err error) {
-			if executorPtr == nil {
+			if executorPtr == nil || runnerPtr == nil {
 				return r, errors.New("system is not started yet")
 			}
+			executor := *executorPtr
+			runner := *runnerPtr
 
 			// Fetch the resources
 			workflow, err := testWorkflowsClient.Get(data.Name)
@@ -331,7 +334,6 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 				return r, errors.Wrapf(err, "cannot get workflow '%s'", data.Name)
 			}
 
-			executor := *executorPtr
 			execution, err := executor.Execute(ctx, *workflow, testkube.TestWorkflowExecutionRequest{
 				Name:                      data.ExecutionName,
 				Config:                    data.Config,
@@ -345,6 +347,17 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 				return r, err
 			}
 			r.Executions = []testkube.TestWorkflowExecution{execution}
+
+			// Runner
+			for _, ex := range r.Executions {
+				go func(id string) {
+					err := runner.Monitor(ctx, id)
+					if err != nil {
+						log.DefaultLogger.Errorw("failed to monitor execution", "id", id, "error", err)
+					}
+				}(ex.Id)
+			}
+
 			return r, nil
 		}),
 	}
