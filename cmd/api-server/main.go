@@ -84,10 +84,11 @@ func main() {
 
 	var testWorkflowExecutor testworkflowexecutor.TestWorkflowExecutor
 	var runner runner2.Runner
+	var eventsEmitter *event.Emitter
 
 	// Start local Control Plane
 	if mode == common.ModeStandalone {
-		controlPlane := services.CreateControlPlane(ctx, cfg, features, configMapConfig, &testWorkflowExecutor, &runner)
+		controlPlane := services.CreateControlPlane(ctx, cfg, features, configMapConfig, &testWorkflowExecutor, &runner, &eventsEmitter)
 		g.Go(func() error {
 			return controlPlane.Run(ctx)
 		})
@@ -171,7 +172,7 @@ func main() {
 	if cfg.Trace {
 		eventBus.TraceEvents()
 	}
-	eventsEmitter := event.NewEmitter(eventBus, cfg.TestkubeClusterName)
+	eventsEmitter = event.NewEmitter(eventBus, cfg.TestkubeClusterName)
 
 	// Check Pro/Enterprise subscription
 	proContext := commons.ReadProContext(ctx, cfg, grpcClient)

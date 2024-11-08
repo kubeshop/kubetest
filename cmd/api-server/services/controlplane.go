@@ -20,6 +20,7 @@ import (
 	cloudtestresult "github.com/kubeshop/testkube/pkg/cloud/data/testresult"
 	cloudtestworkflow "github.com/kubeshop/testkube/pkg/cloud/data/testworkflow"
 	"github.com/kubeshop/testkube/pkg/controlplane"
+	"github.com/kubeshop/testkube/pkg/event"
 	"github.com/kubeshop/testkube/pkg/featureflags"
 	"github.com/kubeshop/testkube/pkg/k8sclient"
 	"github.com/kubeshop/testkube/pkg/log"
@@ -60,7 +61,7 @@ func mapTestSuiteFilters(s []*testresult.FilterImpl) []testresult.Filter {
 	return v
 }
 
-func CreateControlPlane(ctx context.Context, cfg *config.Config, features featureflags.FeatureFlags, configMapClient configRepo.Repository, executorPtr *testworkflowexecutor.TestWorkflowExecutor, runnerPtr *runner2.Runner) *controlplane.Server {
+func CreateControlPlane(ctx context.Context, cfg *config.Config, features featureflags.FeatureFlags, configMapClient configRepo.Repository, executorPtr *testworkflowexecutor.TestWorkflowExecutor, runnerPtr *runner2.Runner, emitterPtr **event.Emitter) *controlplane.Server {
 	// Connect to the cluster
 	kubeClient, err := kubeclient.GetClient()
 	commons.ExitOnError("Getting kubernetes client", err)
@@ -350,6 +351,9 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 
 			// Runner
 			for _, ex := range r.Executions {
+				if ex.Result.IsFinished() {
+					continue
+				}
 				go func(id string) {
 					err := runner.Monitor(ctx, id)
 					if err != nil {
