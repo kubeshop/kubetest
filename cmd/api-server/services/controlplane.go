@@ -323,7 +323,7 @@ func CreateControlPlane(ctx context.Context, cfg *config.Config, features featur
 		}),
 
 		cloudtestworkflow.CmdTestWorkflowExecutionSchedule: controlplane.Handler(func(ctx context.Context, data cloudtestworkflow.ExecutionScheduleRequest) (r cloudtestworkflow.ExecutionScheduleResponse, err error) {
-			if executorPtr == nil || runnerPtr == nil {
+			if executorPtr == nil || runnerPtr == nil || emitterPtr == nil {
 				return r, errors.New("system is not started yet")
 			}
 			executor := *executorPtr
