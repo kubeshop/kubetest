@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"strings"
 
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"google.golang.org/grpc"
@@ -17,14 +16,22 @@ import (
 	agentclient "github.com/kubeshop/testkube/pkg/agent/client"
 	cloudartifacts "github.com/kubeshop/testkube/pkg/cloud/data/artifact"
 	cloudtestworkflow "github.com/kubeshop/testkube/pkg/cloud/data/testworkflow"
+	"github.com/kubeshop/testkube/pkg/controlplaneclient"
 	"github.com/kubeshop/testkube/pkg/event/kind/cdevent"
 	"github.com/kubeshop/testkube/pkg/event/kind/k8sevent"
+	"github.com/kubeshop/testkube/pkg/event/kind/testworkflowexecutionmetrics"
+	"github.com/kubeshop/testkube/pkg/event/kind/testworkflowexecutions"
+	"github.com/kubeshop/testkube/pkg/event/kind/testworkflowexecutiontelemetry"
 	"github.com/kubeshop/testkube/pkg/event/kind/webhook"
 	ws "github.com/kubeshop/testkube/pkg/event/kind/websocket"
+	"github.com/kubeshop/testkube/pkg/newclients/testworkflowclient"
+	"github.com/kubeshop/testkube/pkg/newclients/testworkflowtemplateclient"
+	runner2 "github.com/kubeshop/testkube/pkg/runner"
 	"github.com/kubeshop/testkube/pkg/secretmanager"
 	"github.com/kubeshop/testkube/pkg/server"
 	"github.com/kubeshop/testkube/pkg/tcl/checktcl"
 	"github.com/kubeshop/testkube/pkg/tcl/schedulertcl"
+	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowconfig"
 	"github.com/kubeshop/testkube/pkg/testworkflows/testworkflowprocessor/presets"
 
 	"github.com/kubeshop/testkube/internal/common"
@@ -63,6 +70,9 @@ func main() {
 	mode := common.ModeStandalone
 	if cfg.TestkubeProAPIKey != "" {
 		mode = common.ModeAgent
+	} else {
+		cfg.TestkubeProURL = fmt.Sprintf("%s:%d", cfg.APIServerFullname, cfg.GRPCServerPort)
+		cfg.TestkubeProTLSInsecure = true
 	}
 
 	// Run services within an errgroup to propagate errors between services.
@@ -78,33 +88,14 @@ func main() {
 
 	configMapConfig := commons.MustGetConfigMapConfig(ctx, cfg.APIServerConfig, cfg.TestkubeNamespace, cfg.TestkubeAnalyticsEnabled)
 
-	// Start local Control Plane
-	if mode == common.ModeStandalone {
-		controlPlane := services.CreateControlPlane(ctx, cfg, features, configMapConfig)
-		g.Go(func() error {
-			return controlPlane.Run(ctx)
-		})
-
-		// Rewire connection
-		cfg.TestkubeProURL = fmt.Sprintf("%s:%d", cfg.APIServerFullname, cfg.GRPCServerPort)
-		cfg.TestkubeProTLSInsecure = true
-	}
-
-	clusterId, _ := configMapConfig.GetUniqueClusterId(ctx)
-	telemetryEnabled, _ := configMapConfig.GetTelemetryEnabled(ctx)
-
 	// k8s
 	kubeClient, err := kubeclient.GetClient()
 	commons.ExitOnError("Getting kubernetes client", err)
 	clientset, err := k8sclient.ConnectToK8s()
 	commons.ExitOnError("Creating k8s clientset", err)
 
-	// k8s clients
-	secretClient := secret.NewClientFor(clientset, cfg.TestkubeNamespace)
-	configMapClient := configmap.NewClientFor(clientset, cfg.TestkubeNamespace)
-	webhooksClient := executorsclientv1.NewWebhooksClient(kubeClient, cfg.TestkubeNamespace)
-	testTriggersClient := testtriggersclientv1.NewClient(kubeClient, cfg.TestkubeNamespace)
-	testWorkflowExecutionsClient := testworkflowsclientv1.NewTestWorkflowExecutionsClient(kubeClient, cfg.TestkubeNamespace)
+	var eventsEmitter *event.Emitter
+	lazyEmitter := event.Lazy(&eventsEmitter)
 
 	// TODO: Make granular environment variables, yet backwards compatible
 	secretConfig := testkube.SecretConfig{
@@ -118,62 +109,71 @@ func main() {
 	}
 	secretManager := secretmanager.New(clientset, secretConfig)
 
+	metrics := metrics.NewMetrics()
+
+	lazyRunner := runner2.LazyExecute()
+
+	// Connect to the Control Plane
+	var grpcConn *grpc.ClientConn
+	if mode == common.ModeStandalone {
+		controlPlane := services.CreateControlPlane(ctx, cfg, features, secretManager, metrics, lazyRunner, lazyEmitter)
+		g.Go(func() error {
+			return controlPlane.Start(ctx)
+		})
+		grpcConn, err = agentclient.NewGRPCConnection(ctx, true, true, fmt.Sprintf("127.0.0.1:%d", cfg.GRPCServerPort), "", "", "", log.DefaultLogger)
+	} else {
+		grpcConn, err = agentclient.NewGRPCConnection(
+			ctx,
+			cfg.TestkubeProTLSInsecure,
+			cfg.TestkubeProSkipVerify,
+			cfg.TestkubeProURL,
+			cfg.TestkubeProCertFile,
+			cfg.TestkubeProKeyFile,
+			cfg.TestkubeProCAFile, //nolint
+			log.DefaultLogger,
+		)
+	}
+	commons.ExitOnError("error creating gRPC connection", err)
+	grpcClient := cloud.NewTestKubeCloudAPIClient(grpcConn)
+
+	clusterId, _ := configMapConfig.GetUniqueClusterId(ctx)
+	telemetryEnabled, _ := configMapConfig.GetTelemetryEnabled(ctx)
+
+	// k8s clients
+	webhooksClient := executorsclientv1.NewWebhooksClient(kubeClient, cfg.TestkubeNamespace)
+	testTriggersClient := testtriggersclientv1.NewClient(kubeClient, cfg.TestkubeNamespace)
+
 	envs := commons.GetEnvironmentVariables()
 
-	inspector := commons.CreateImageInspector(cfg, configMapClient, secretClient)
+	inspector := commons.CreateImageInspector(&cfg.ImageInspectorConfig, configmap.NewClientFor(clientset, cfg.TestkubeNamespace), secret.NewClientFor(clientset, cfg.TestkubeNamespace))
 
-	var testWorkflowsClient testworkflowsclientv1.Interface
-	var testWorkflowTemplatesClient testworkflowsclientv1.TestWorkflowTemplatesInterface
+	var testWorkflowsClient testworkflowclient.TestWorkflowClient
+	var testWorkflowTemplatesClient testworkflowtemplateclient.TestWorkflowTemplateClient
 
-	var grpcClient cloud.TestKubeCloudAPIClient
-	var grpcConn *grpc.ClientConn
-	// Use local network for local access
-	controlPlaneUrl := cfg.TestkubeProURL
-	if strings.HasPrefix(controlPlaneUrl, fmt.Sprintf("%s:%d", cfg.APIServerFullname, cfg.GRPCServerPort)) {
-		controlPlaneUrl = fmt.Sprintf("127.0.0.1:%d", cfg.GRPCServerPort)
-	}
-	grpcConn, err = agentclient.NewGRPCConnection(
-		ctx,
-		cfg.TestkubeProTLSInsecure,
-		cfg.TestkubeProSkipVerify,
-		controlPlaneUrl,
-		cfg.TestkubeProCertFile,
-		cfg.TestkubeProKeyFile,
-		cfg.TestkubeProCAFile, //nolint
-		log.DefaultLogger,
-	)
-	commons.ExitOnError("error creating gRPC connection", err)
-
-	grpcClient = cloud.NewTestKubeCloudAPIClient(grpcConn)
-
-	if mode == common.ModeAgent && cfg.WorkflowStorage == "control-plane" {
-		testWorkflowsClient = cloudtestworkflow.NewCloudTestWorkflowRepository(grpcClient, grpcConn, cfg.TestkubeProAPIKey)
-		testWorkflowTemplatesClient = cloudtestworkflow.NewCloudTestWorkflowTemplateRepository(grpcClient, grpcConn, cfg.TestkubeProAPIKey)
-	} else {
-		testWorkflowsClient = testworkflowsclientv1.NewClient(kubeClient, cfg.TestkubeNamespace)
-		testWorkflowTemplatesClient = testworkflowsclientv1.NewTestWorkflowTemplatesClient(kubeClient, cfg.TestkubeNamespace)
-	}
-
-	testWorkflowResultsRepository := cloudtestworkflow.NewCloudRepository(grpcClient, grpcConn, cfg.TestkubeProAPIKey)
-	var opts []cloudtestworkflow.Option
-	if cfg.StorageSkipVerify {
-		opts = append(opts, cloudtestworkflow.WithSkipVerify())
-	}
-	testWorkflowOutputRepository := cloudtestworkflow.NewCloudOutputRepository(grpcClient, grpcConn, cfg.TestkubeProAPIKey, opts...)
+	testWorkflowResultsRepository := cloudtestworkflow.NewCloudRepository(grpcClient, cfg.TestkubeProAPIKey)
+	testWorkflowOutputRepository := cloudtestworkflow.NewCloudOutputRepository(grpcClient, cfg.TestkubeProAPIKey, cfg.StorageSkipVerify)
 	triggerLeaseBackend := triggers.NewAcquireAlwaysLeaseBackend()
-	artifactStorage := cloudartifacts.NewCloudArtifactsStorage(grpcClient, grpcConn, cfg.TestkubeProAPIKey)
+	artifactStorage := cloudartifacts.NewCloudArtifactsStorage(grpcClient, cfg.TestkubeProAPIKey)
 
 	nc := commons.MustCreateNATSConnection(cfg)
 	eventBus := bus.NewNATSBus(nc)
 	if cfg.Trace {
 		eventBus.TraceEvents()
 	}
-	eventsEmitter := event.NewEmitter(eventBus, cfg.TestkubeClusterName)
+	eventsEmitter = event.NewEmitter(eventBus, cfg.TestkubeClusterName)
 
 	// Check Pro/Enterprise subscription
 	proContext := commons.ReadProContext(ctx, cfg, grpcClient)
-	subscriptionChecker, err := checktcl.NewSubscriptionChecker(ctx, proContext, grpcClient, grpcConn)
+	subscriptionChecker, err := checktcl.NewSubscriptionChecker(ctx, proContext, grpcClient)
 	commons.ExitOnError("Failed creating subscription checker", err)
+
+	if proContext.TestWorkflowStorage && cfg.FeatureTestWorkflowCloudStorage {
+		testWorkflowsClient = testworkflowclient.NewCloudTestWorkflowClient(grpcClient, cfg.TestkubeProAPIKey)
+		testWorkflowTemplatesClient = testworkflowtemplateclient.NewCloudTestWorkflowTemplateClient(grpcClient, cfg.TestkubeProAPIKey)
+	} else {
+		testWorkflowsClient = testworkflowclient.NewKubernetesTestWorkflowClient(kubeClient, cfg.TestkubeNamespace)
+		testWorkflowTemplatesClient = testworkflowtemplateclient.NewKubernetesTestWorkflowTemplateClient(kubeClient, cfg.TestkubeNamespace)
+	}
 
 	serviceAccountNames := map[string]string{
 		cfg.TestkubeNamespace: cfg.JobServiceAccountName,
@@ -185,7 +185,14 @@ func main() {
 		serviceAccountNames = schedulertcl.GetServiceAccountNamesFromConfig(serviceAccountNames, cfg.TestkubeExecutionNamespaces)
 	}
 
-	metrics := metrics.NewMetrics()
+	// Build new client
+	agentId := cfg.TestkubeProAgentID
+	if agentId == "" {
+		agentId = proContext.EnvID
+	}
+	client := controlplaneclient.New(grpcClient, proContext, agentId, cfg.TestkubeProAPIKey, controlplaneclient.ClientOptions{
+		StorageSkipVerify: cfg.StorageSkipVerify,
+	})
 
 	var deprecatedSystem *services.DeprecatedSystem
 	if !cfg.DisableDeprecatedTests {
@@ -198,7 +205,6 @@ func main() {
 			configMapConfig,
 			secretConfig,
 			grpcClient,
-			grpcConn,
 			nc,
 			eventsEmitter,
 			eventBus,
@@ -214,28 +220,54 @@ func main() {
 	if mode == common.ModeAgent {
 		testWorkflowProcessor = presets.NewPro(inspector)
 	}
-	executionWorker := services.CreateExecutionWorker(clientset, cfg, clusterId, serviceAccountNames, testWorkflowProcessor)
+	executionWorker := services.CreateExecutionWorker(clientset, cfg, clusterId, serviceAccountNames, testWorkflowProcessor, map[string]string{
+		testworkflowconfig.FeatureFlagNewExecutions:            fmt.Sprintf("%v", cfg.FeatureNewExecutions),
+		testworkflowconfig.FeatureFlagTestWorkflowCloudStorage: fmt.Sprintf("%v", cfg.FeatureTestWorkflowCloudStorage),
+	})
+
+	runnerService := runner2.NewService(
+		agentId,
+		log.DefaultLogger,
+		eventsEmitter,
+		metrics,
+		configMapConfig,
+		client,
+		proContext,
+		executionWorker,
+		runner2.Options{
+			ClusterID:                  clusterId,
+			DashboardURI:               cfg.TestkubeDashboardURI,
+			DefaultNamespace:           cfg.TestkubeNamespace,
+			ServiceAccountNames:        serviceAccountNames,
+			StorageSkipVerify:          cfg.StorageSkipVerify,
+			ControlPlaneStorageEnabled: proContext.TestWorkflowStorage && cfg.FeatureTestWorkflowCloudStorage,
+			NewExecutionsEnabled:       proContext.NewExecutions && cfg.FeatureNewExecutions,
+		},
+	)
+	g.Go(func() error {
+		return runnerService.Start(ctx)
+	})
+	lazyRunner.Set(runnerService)
 
 	testWorkflowExecutor := testworkflowexecutor.New(
+		grpcClient,
+		cfg.TestkubeProAPIKey,
+		cfg.CDEventsTarget,
 		eventsEmitter,
-		executionWorker,
-		clientset,
+		runnerService,
 		testWorkflowResultsRepository,
 		testWorkflowOutputRepository,
-		configMapConfig,
 		testWorkflowTemplatesClient,
-		testWorkflowExecutionsClient,
 		testWorkflowsClient,
 		metrics,
 		secretManager,
 		cfg.GlobalWorkflowTemplateName,
 		cfg.TestkubeDashboardURI,
-		&proContext,
+		proContext.OrgID,
+		proContext.EnvID,
+		agentId,
+		proContext.NewExecutions && cfg.FeatureNewExecutions,
 	)
-	g.Go(func() error {
-		testWorkflowExecutor.Recover(ctx)
-		return nil
-	})
 
 	var deprecatedClients commons.DeprecatedClients
 	var deprecatedRepositories commons.DeprecatedRepositories
@@ -262,6 +294,17 @@ func main() {
 	if cfg.EnableK8sEvents {
 		eventsEmitter.Loader.Register(k8sevent.NewK8sEventLoader(clientset, cfg.TestkubeNamespace, testkube.AllEventTypes))
 	}
+
+	// Update TestWorkflowExecution Kubernetes resource objects on status change
+	eventsEmitter.Loader.Register(testworkflowexecutions.NewLoader(ctx, cfg.TestkubeNamespace, kubeClient))
+
+	// Update the Prometheus metrics regarding the Test Workflow Execution
+	eventsEmitter.Loader.Register(testworkflowexecutionmetrics.NewLoader(ctx, metrics, cfg.TestkubeDashboardURI))
+
+	// Send the telemetry data regarding the Test Workflow Execution
+	// TODO: Disable it if Control Plane does that
+	eventsEmitter.Loader.Register(testworkflowexecutiontelemetry.NewLoader(ctx, configMapConfig))
+
 	eventsEmitter.Listen(ctx)
 	g.Go(func() error {
 		eventsEmitter.Reconcile(ctx)
@@ -286,11 +329,12 @@ func main() {
 		webhooksClient,
 		testTriggersClient,
 		testWorkflowsClient,
+		testworkflowsclientv1.NewClient(kubeClient, cfg.TestkubeNamespace),
 		testWorkflowTemplatesClient,
+		testworkflowsclientv1.NewTestWorkflowTemplatesClient(kubeClient, cfg.TestkubeNamespace),
 		configMapConfig,
 		secretManager,
 		secretConfig,
-		testWorkflowExecutor,
 		executionWorker,
 		eventsEmitter,
 		websocketLoader,
@@ -301,6 +345,7 @@ func main() {
 		cfg.TestkubeHelmchartVersion,
 		serviceAccountNames,
 		cfg.TestkubeDockerImageVersion,
+		testWorkflowExecutor,
 	)
 	api.Init(httpServer)
 
@@ -310,27 +355,29 @@ func main() {
 	if deprecatedSystem != nil && deprecatedSystem.StreamLogs != nil {
 		getDeprecatedLogStream = deprecatedSystem.StreamLogs
 	}
-	agentHandle, err := agent.NewAgent(
-		log.DefaultLogger,
-		httpServer.Mux.Handler(),
-		grpcClient,
-		getDeprecatedLogStream,
-		agent.GetTestWorkflowNotificationsStream(testWorkflowResultsRepository, executionWorker),
-		agent.GetTestWorkflowServiceNotificationsStream(testWorkflowResultsRepository, executionWorker),
-		agent.GetTestWorkflowParallelStepNotificationsStream(testWorkflowResultsRepository, executionWorker),
-		clusterId,
-		cfg.TestkubeClusterName,
-		features,
-		&proContext,
-		cfg.TestkubeDockerImageVersion,
-	)
-	commons.ExitOnError("Starting agent", err)
-	g.Go(func() error {
-		err = agentHandle.Run(ctx)
-		commons.ExitOnError("Running agent", err)
-		return nil
-	})
-	eventsEmitter.Loader.Register(agentHandle)
+	if !cfg.DisableDefaultAgent {
+		agentHandle, err := agent.NewAgent(
+			log.DefaultLogger,
+			httpServer.Mux.Handler(),
+			grpcClient,
+			getDeprecatedLogStream,
+			clusterId,
+			cfg.TestkubeClusterName,
+			features,
+			&proContext,
+			cfg.TestkubeDockerImageVersion,
+			eventsEmitter,
+			cfg.FeatureNewExecutions,
+			cfg.FeatureTestWorkflowCloudStorage,
+		)
+		commons.ExitOnError("Starting agent", err)
+		g.Go(func() error {
+			err = agentHandle.Run(ctx)
+			commons.ExitOnError("Running agent", err)
+			return nil
+		})
+		eventsEmitter.Loader.Register(agentHandle)
+	}
 
 	if !cfg.DisableTestTriggers {
 		k8sCfg, err := k8sclient.GetK8sClientConfig()

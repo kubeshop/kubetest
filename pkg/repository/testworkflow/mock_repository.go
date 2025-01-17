@@ -36,6 +36,21 @@ func (m *MockRepository) EXPECT() *MockRepositoryMockRecorder {
 	return m.recorder
 }
 
+// Assign mocks base method.
+func (m *MockRepository) Assign(arg0 context.Context, arg1, arg2, arg3 string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Assign", arg0, arg1, arg2, arg3)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Assign indicates an expected call of Assign.
+func (mr *MockRepositoryMockRecorder) Assign(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Assign", reflect.TypeOf((*MockRepository)(nil).Assign), arg0, arg1, arg2, arg3)
+}
+
 // DeleteAll mocks base method.
 func (m *MockRepository) DeleteAll(arg0 context.Context) error {
 	m.ctrl.T.Helper()
@@ -261,6 +276,35 @@ func (m *MockRepository) GetTestWorkflowMetrics(arg0 context.Context, arg1 strin
 func (mr *MockRepositoryMockRecorder) GetTestWorkflowMetrics(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetTestWorkflowMetrics", reflect.TypeOf((*MockRepository)(nil).GetTestWorkflowMetrics), arg0, arg1, arg2, arg3)
+}
+
+// GetUnassigned mocks base method.
+func (m *MockRepository) GetUnassigned(arg0 context.Context) ([]testkube.TestWorkflowExecution, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUnassigned", arg0)
+	ret0, _ := ret[0].([]testkube.TestWorkflowExecution)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUnassigned indicates an expected call of GetUnassigned.
+func (mr *MockRepositoryMockRecorder) GetUnassigned(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUnassigned", reflect.TypeOf((*MockRepository)(nil).GetUnassigned), arg0)
+}
+
+// Init mocks base method.
+func (m *MockRepository) Init(arg0 context.Context, arg1 string, arg2 InitData) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Init", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Init indicates an expected call of Init.
+func (mr *MockRepositoryMockRecorder) Init(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Init", reflect.TypeOf((*MockRepository)(nil).Init), arg0, arg1, arg2)
 }
 
 // Insert mocks base method.
