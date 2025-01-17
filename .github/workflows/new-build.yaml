@@ -22,7 +22,7 @@ jobs:
       - name: Set up Depot CLI
         uses: depot/setup-action@v1
 
-      - uses: sigstore/cosign-installer@v3.7.0
+ #     - uses: sigstore/cosign-installer@v3.7.0
       - uses: anchore/sbom-action/download-syft@v0.17.7
 
       - name: Login to DockerHub
